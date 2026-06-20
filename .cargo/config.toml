@@ -1,0 +1,1 @@
+# No special linker flags needed — libgcc_eh/libgcc shims are in the LLVM MinGW lib dir.

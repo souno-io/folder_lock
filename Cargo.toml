@@ -1,0 +1,37 @@
+[package]
+name = "folder_lock"
+version = "0.1.0"
+edition = "2024"
+authors = ["folder_lock"]
+
+[[bin]]
+name = "folder_lock"
+path = "src/main.rs"
+
+# Headless CLI helper for scripting/testing (encrypt/decrypt without GUI).
+[[bin]]
+name = "flock_cli"
+path = "src/cli.rs"
+
+[dependencies]
+# Authenticated symmetric encryption
+aes-gcm = "0.10"
+# Password-based key derivation (memory-hard, anti brute-force)
+argon2 = "0.5"
+# CSPRNG for salts / nonces
+rand = "0.8"
+# Zeroize secrets from memory
+zeroize = { version = "1.8", features = ["zeroize_derive"] }
+
+[build-dependencies]
+# Image generation for the application icon (build-time only)
+image = { version = "0.25", default-features = false, features = ["png"] }
+# Compile .rc → .res and link into the exe (calls windres, now available)
+embed-resource = "2.4"
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true

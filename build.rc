@@ -1,0 +1,8 @@
+// Windows resource script for folder_lock.exe
+// Requires: assets/icon.ico and assets/manifest.xml
+
+// Application icon (ID 1 = IDI_APP)
+1 ICON "assets/icon.ico"
+
+// Application manifest (type 24 = CREATEPROCESS_MANIFEST_RESOURCE_ID)
+24 24 "assets/manifest.xml"
