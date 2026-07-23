@@ -3,6 +3,7 @@
 //! Usage:
 //!   flock_cli encrypt <password>      encrypt the current folder in place (full mode)
 //!   flock_cli encrypt-simple <password> encrypt using ADS simple mode (fast, no encryption)
+//!   flock_cli encrypt-move <password> lock by moving files into a hidden container (instant)
 //!   flock_cli decrypt <password>      decrypt the current folder in place
 //!   flock_cli status                  report whether the folder is locked
 
@@ -23,6 +24,7 @@ fn main() {
         "status" => cmd_status(&folder),
         "encrypt" => cmd_encrypt(&folder, args.get(2)),
         "encrypt-simple" => cmd_encrypt_simple(&folder, args.get(2)),
+        "encrypt-move" => cmd_encrypt_move(&folder, args.get(2)),
         "decrypt" => cmd_decrypt(&folder, args.get(2)),
         _ => {
             eprintln!("unknown command: {}", cmd);
@@ -43,7 +45,7 @@ fn main() {
 }
 
 fn usage() {
-    eprintln!("usage: flock_cli <status|encrypt <pw>|encrypt-simple <pw>|decrypt <pw>>");
+    eprintln!("usage: flock_cli <status|encrypt <pw>|encrypt-simple <pw>|encrypt-move <pw>|decrypt <pw>>");
 }
 
 fn cmd_status(folder: &PathBuf) -> Result<String, String> {
@@ -70,6 +72,15 @@ fn cmd_encrypt_simple(folder: &PathBuf, pw: Option<&String>) -> Result<String, S
     let n = vault::encrypt_folder_simple(folder, &key, &salt)?;
     crypto::zero_key(&mut key);
     Ok(format!("encrypted {} file(s) (simple ADS mode)", n))
+}
+
+fn cmd_encrypt_move(folder: &PathBuf, pw: Option<&String>) -> Result<String, String> {
+    let pw = pw.ok_or("missing password argument")?;
+    let salt = crypto::random_salt();
+    let mut key = crypto::derive_key(pw.as_bytes(), &salt)?;
+    let n = vault::encrypt_folder_move(folder, &key, &salt)?;
+    crypto::zero_key(&mut key);
+    Ok(format!("encrypted {} file(s) (move-lock mode)", n))
 }
 
 fn cmd_decrypt(folder: &PathBuf, pw: Option<&String>) -> Result<String, String> {

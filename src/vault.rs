@@ -34,9 +34,22 @@
 //!           [stream bytes]  ADS stream name on the host file
 //! ```
 //!
-//! File *contents* are stored as NTFS Alternate Data Streams on `.flockhost`,
-//! unencrypted but invisible to Explorer and plain `dir`. Only the small
-//! manifest (names + stream mapping) is AES-256-GCM encrypted.
+//! ## Move-lock manifest (mode 2), before GCM
+//! ```text
+//!   [magic: 8 bytes]   = b"FLOCKMOV"
+//!   [version: u16]
+//!   [entry count: u32]
+//!   entry_count × entry:  (identical layout to mode 1)
+//!       [path_len: u32] [path bytes] [kind: u8]
+//!       if file: [name_len: u32] [name bytes]  obfuscated name inside `.flockdata`
+//! ```
+//!
+//! File *contents* are stored as NTFS Alternate Data Streams on `.flockhost`
+//! (mode 1), unencrypted but invisible to Explorer and plain `dir`. In mode 2
+//! the file bytes are instead `rename`d into the hidden `.flockdata` container
+//! (a same-volume metadata move, instant regardless of size) and further
+//! guarded by a deny-everyone ACL. In every mode only the small manifest
+//! (names + mapping) is AES-256-GCM encrypted.
 
 use std::collections::BTreeSet;
 use std::fs::{self, File};
@@ -70,25 +83,66 @@ fn hide_file(path: &Path) {
 #[cfg(not(windows))]
 fn hide_file(_path: &Path) {}
 
+// ── Windows: ACL deny/restore layer (single-object, so it stays instant) ──
+
+/// Run `icacls` on a single object without popping a console window.
+#[cfg(windows)]
+fn run_icacls(path: &Path, extra: &[&str]) {
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    let abs = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let mut cmd = std::process::Command::new("icacls");
+    cmd.arg(abs.as_os_str());
+    cmd.args(extra);
+    cmd.creation_flags(CREATE_NO_WINDOW);
+    let _ = cmd.output();
+}
+
+/// Deny the well-known `Everyone` group (SID S-1-1-0) access to `path`.
+/// Applied to the directory object only (no inheritance) so it completes
+/// instantly; blocking traversal of the container is enough to hide children.
+/// Best-effort: the move itself is the primary protection.
+#[cfg(windows)]
+fn acl_deny_everyone(path: &Path) {
+    run_icacls(path, &["/deny", "*S-1-1-0:(F)"]);
+}
+
+/// Remove the deny ACE added by [`acl_deny_everyone`]. The current user is the
+/// owner, so it always retains the right to rewrite the DACL.
+#[cfg(windows)]
+fn acl_restore_everyone(path: &Path) {
+    run_icacls(path, &["/remove:d", "*S-1-1-0"]);
+}
+
+#[cfg(not(windows))]
+fn acl_deny_everyone(_path: &Path) {}
+#[cfg(not(windows))]
+fn acl_restore_everyone(_path: &Path) {}
+
 const MAGIC_FULL: &[u8; 8] = b"FLOCKVLT";
 const MAGIC_SIMPLE: &[u8; 8] = b"FLOCKLIT";
+const MAGIC_MOVE: &[u8; 8] = b"FLOCKMOV";
 const VERSION: u16 = 1;
 
 /// Encryption mode stored in the vault header.
 pub const MODE_FULL: u8 = 0;
 pub const MODE_SIMPLE: u8 = 1;
+pub const MODE_MOVE: u8 = 2;
 
 /// Visible name of the vault file inside the folder.
 pub const VAULT_FILE: &str = ".flockvault";
 /// Host file that carries ADS streams in simple mode.
 pub const HOST_FILE: &str = ".flockhost";
+/// Hidden container directory that holds relocated files in move-lock mode.
+pub const DATA_DIR: &str = ".flockdata";
 
-/// Names that must never be packed (the tool itself + vault + host).
+/// Names that must never be packed (the tool itself + vault + host + data dir).
 pub fn is_protected_name(file_name: &str) -> bool {
     let lower = file_name.to_ascii_lowercase();
     lower == VAULT_FILE
         || lower == format!("{}.tmp", VAULT_FILE)
         || lower == HOST_FILE
+        || lower == DATA_DIR
         || lower.ends_with(".exe")
 }
 
@@ -254,9 +308,9 @@ struct SimpleEntry {
     stream: Option<String>, // None for dirs
 }
 
-fn serialize_manifest_simple(entries: &[SimpleEntry]) -> Vec<u8> {
+fn serialize_manifest_simple(magic: &[u8; 8], entries: &[SimpleEntry]) -> Vec<u8> {
     let mut buf = Vec::new();
-    buf.extend_from_slice(MAGIC_SIMPLE);
+    buf.extend_from_slice(magic);
     buf.extend_from_slice(&VERSION.to_le_bytes());
     buf.extend_from_slice(&(entries.len() as u32).to_le_bytes());
     for e in entries {
@@ -336,7 +390,7 @@ pub fn encrypt_folder_simple(folder: &Path, key: &Key, salt: &Salt) -> Result<us
         return Ok(0);
     }
 
-    let manifest = serialize_manifest_simple(&entries);
+    let manifest = serialize_manifest_simple(MAGIC_SIMPLE, &entries);
     let manifest_ct = crypto::encrypt(key, &manifest)?;
 
     write_vault(folder, salt, MODE_SIMPLE, &manifest_ct)?;
@@ -414,6 +468,123 @@ fn decrypt_folder_simple(folder: &Path, _key: &Key, manifest: &[u8]) -> Result<u
     Ok(file_count)
 }
 
+// ────────────────────────────────────── MOVE-lock encryption (mode 2) ──
+
+/// Move-lock encryption: relocate every file into the hidden `.flockdata`
+/// container via `fs::rename` (a same-volume metadata move — instant no matter
+/// how large the file), record the original→obfuscated mapping in the
+/// AES-encrypted manifest, then hide the container and drop a deny-everyone ACL
+/// on top. NTFS same-volume only.
+pub fn encrypt_folder_move(folder: &Path, key: &Key, salt: &Salt) -> Result<usize, String> {
+    let mut dirs: Vec<PathBuf> = Vec::new();
+    let mut files: Vec<PathBuf> = Vec::new();
+    collect_tree(folder, &mut dirs, &mut files)?;
+    dirs.sort();
+    files.sort();
+
+    if dirs.is_empty() && files.is_empty() {
+        return Ok(0);
+    }
+
+    let data_dir = folder.join(DATA_DIR);
+    fs::create_dir_all(&data_dir).map_err(|e| format!("无法创建数据容器: {}", e))?;
+
+    let mut entries: Vec<SimpleEntry> = Vec::new();
+    let mut count = 0usize;
+
+    for d in &dirs {
+        entries.push(SimpleEntry {
+            rel: rel_path(folder, d)?,
+            is_dir: true,
+            stream: None,
+        });
+    }
+
+    for f in &files {
+        let rel = rel_path(folder, f)?;
+        let name = format!("fl_{:06}", count);
+        let target = data_dir.join(&name);
+        // Pure metadata move: no byte copy, so this is instant for any size.
+        fs::rename(f, &target)
+            .map_err(|e| format!("移动文件失败 {}: {}", f.display(), e))?;
+        entries.push(SimpleEntry {
+            rel,
+            is_dir: false,
+            stream: Some(name),
+        });
+        count += 1;
+    }
+
+    let manifest = serialize_manifest_simple(MAGIC_MOVE, &entries);
+    let manifest_ct = crypto::encrypt(key, &manifest)?;
+    write_vault(folder, salt, MODE_MOVE, &manifest_ct)?;
+
+    // Remove the now-empty original tree, then hide + lock the container.
+    delete_tree(folder)?;
+    hide_file(&data_dir);
+    acl_deny_everyone(&data_dir);
+    Ok(count)
+}
+
+fn decrypt_folder_move(folder: &Path, _key: &Key, manifest: &[u8]) -> Result<usize, String> {
+    if manifest.len() < 8 + 2 + 4 {
+        return Err("vault 数据损坏".into());
+    }
+    if &manifest[0..8] != MAGIC_MOVE {
+        return Err("vault 标识不匹配".into());
+    }
+    let count = u32::from_le_bytes([manifest[10], manifest[11], manifest[12], manifest[13]]) as usize;
+    let mut pos = 14;
+    let data_dir = folder.join(DATA_DIR);
+
+    // Lift the deny ACL first so we can read the container back.
+    acl_restore_everyone(&data_dir);
+    let mut file_count = 0usize;
+
+    for _ in 0..count {
+        let (plen, consumed) = read_u32(manifest, pos)?;
+        pos += consumed;
+        let rel_bytes = manifest.get(pos..pos + plen as usize).ok_or("vault 数据损坏 (path)")?;
+        pos += plen as usize;
+        let rel = std::str::from_utf8(rel_bytes).map_err(|_| "vault 路径不是有效 UTF-8".to_string())?;
+        if rel.contains("..") || rel.starts_with('/') || rel.contains('\\') {
+            return Err(format!("拒绝不安全的路径: {}", rel));
+        }
+
+        let kind = *manifest.get(pos).ok_or("vault 数据损坏 (kind)")?;
+        pos += 1;
+
+        let target = folder.join(rel.replace('/', std::path::MAIN_SEPARATOR_STR));
+
+        if kind == 1 {
+            fs::create_dir_all(&target)
+                .map_err(|e| format!("创建目录失败 {}: {}", target.display(), e))?;
+        } else {
+            let (nlen, consumed) = read_u32(manifest, pos)?;
+            pos += consumed;
+            let name_bytes = manifest.get(pos..pos + nlen as usize).ok_or("vault 数据损坏 (name)")?;
+            pos += nlen as usize;
+            let name = std::str::from_utf8(name_bytes).map_err(|_| "名称无效".to_string())?;
+            if name.contains('/') || name.contains('\\') || name.contains("..") {
+                return Err(format!("拒绝不安全的容器名: {}", name));
+            }
+
+            let src = data_dir.join(name);
+            if let Some(parent) = target.parent() {
+                fs::create_dir_all(parent).map_err(|e| format!("创建父目录失败: {}", e))?;
+            }
+            // Move the file back to its original location (instant).
+            fs::rename(&src, &target)
+                .map_err(|e| format!("恢复文件失败 {}: {}", name, e))?;
+            file_count += 1;
+        }
+    }
+
+    // Drop the now-empty container.
+    let _ = fs::remove_dir_all(&data_dir);
+    Ok(file_count)
+}
+
 // ────────────────────────────────────── shared helpers ──
 
 /// Write the vault file: salt + mode + manifest ciphertext.
@@ -451,6 +622,7 @@ pub fn decrypt_folder(folder: &Path, key: &Key) -> Result<usize, String> {
     let result = match mode {
         MODE_FULL => decrypt_folder_full(folder, key, &manifest),
         MODE_SIMPLE => decrypt_folder_simple(folder, key, &manifest),
+        MODE_MOVE => decrypt_folder_move(folder, key, &manifest),
         _ => Err(format!("未知的 vault 模式: {}", mode)),
     };
 

@@ -65,6 +65,50 @@ fn encrypt_then_decrypt_roundtrip() {
 }
 
 #[test]
+fn move_lock_roundtrip() {
+    let dir = tempfile_dir();
+    build_sample_tree(&dir);
+
+    let password = b"instant lock please";
+    let salt = crypto::random_salt();
+    let key = crypto::derive_key(password, &salt).unwrap();
+
+    let n = vault::encrypt_folder_move(&dir, &key, &salt).unwrap();
+    assert!(n >= 4, "expected at least 4 files moved, got {}", n);
+
+    // Originals gone, vault present. (The hidden container may be ACL-denied
+    // here, so we don't stat it while locked — accessibility varies by env.)
+    assert!(!dir.join("secret.txt").exists(), "secret.txt still present after move-lock");
+    assert!(!dir.join("sub").exists(), "sub dir still present after move-lock");
+    assert!(dir.join(vault::VAULT_FILE).exists(), "vault file missing");
+
+    // Wrong password must fail (manifest is still AES-GCM protected).
+    let wrong_salt = vault::read_vault_salt(&dir).unwrap();
+    let wrong_key = crypto::derive_key(b"nope", &wrong_salt).unwrap();
+    assert!(vault::decrypt_folder(&dir, &wrong_key).is_err(), "wrong password should fail");
+
+    // Correct password restores everything.
+    let right_salt = vault::read_vault_salt(&dir).unwrap();
+    let right_key = crypto::derive_key(password, &right_salt).unwrap();
+    let restored = vault::decrypt_folder(&dir, &right_key).unwrap();
+    assert!(restored >= 4, "expected at least 4 files restored, got {}", restored);
+
+    // Content integrity + cleanup.
+    assert_eq!(fs::read_to_string(dir.join("secret.txt")).unwrap(), "Hello secret content\r\n");
+    assert_eq!(
+        fs::read_to_string(dir.join("sub").join("nested.txt")).unwrap(),
+        "nested file content"
+    );
+    let deep = fs::read(dir.join("a").join("b").join("deep.bin")).unwrap();
+    assert_eq!(deep.len(), 4096);
+    assert!(dir.join("emptydir").is_dir(), "empty dir should be restored");
+    assert!(!dir.join(vault::VAULT_FILE).exists(), "vault should be removed after decrypt");
+    assert!(!dir.join(vault::DATA_DIR).exists(), "data container should be removed after decrypt");
+
+    fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
 fn key_is_deterministic_for_same_password_and_salt() {
     let salt = [1u8; 16];
     let k1 = crypto::derive_key(b"pw", &salt).unwrap();

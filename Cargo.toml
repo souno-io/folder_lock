@@ -22,12 +22,17 @@ argon2 = "0.5"
 rand = "0.8"
 # Zeroize secrets from memory
 zeroize = { version = "1.8", features = ["zeroize_derive"] }
+# Modern declarative GUI (single-file, no external runtime; fluent style
+# auto-follows the system light/dark color scheme).
+slint = "1.17"
 
 [build-dependencies]
 # Image generation for the application icon (build-time only)
 image = { version = "0.25", default-features = false, features = ["png"] }
 # Compile .rc → .res and link into the exe (calls windres, now available)
 embed-resource = "2.4"
+# Compile .slint markup into Rust at build time
+slint-build = "1.17"
 
 [profile.release]
 opt-level = "z"

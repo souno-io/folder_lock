@@ -1,0 +1,406 @@
+// Modern single-window UI for Folder Lock.
+// Uses the built-in `fluent` style, which auto-follows the system light/dark
+// color scheme; all colors are pulled from `Palette` so the whole window
+// adapts automatically. Chinese text uses Microsoft YaHei (present on every
+// Windows install) to guarantee correct glyph rendering. The lock glyph is a
+// vector `Path`, so it stays crisp at any DPI and needs no image asset.
+
+import { Button, LineEdit, Spinner, Palette } from "std-widgets.slint";
+
+// ─────────────────────────────────────────── vector lock glyph
+// Drawn inside a 24×24 box: a stroked shackle (open arc) + a solid body with a
+// punched-through keyhole. `ink` is the light foreground; `hole` is the color
+// behind the icon so the keyhole reads as a cut-out.
+component LockIcon inherits Rectangle {
+    in property <brush> ink;
+    in property <brush> hole;
+    width: 24px;
+    height: 24px;
+
+    // shackle
+    Path {
+        x: 0; y: 0;
+        width: 24px; height: 24px;
+        viewbox-width: 24; viewbox-height: 24;
+        stroke: root.ink;
+        stroke-width: 2.2px;
+        fill: transparent;
+        commands: "M7 12 L7 8 A5 5 0 0 1 17 8 L17 12";
+    }
+    // body
+    Rectangle {
+        x: 4px; y: 11px;
+        width: 16px; height: 10px;
+        border-radius: 2.5px;
+        background: root.ink;
+    }
+    // keyhole (cut-out)
+    Rectangle {
+        x: 11px; y: 14px;
+        width: 2px; height: 4px;
+        border-radius: 1px;
+        background: root.hole;
+    }
+}
+
+// ─────────────────────────────────────────── selectable mode card
+component ModeCard inherits Rectangle {
+    in property <string> title;
+    in property <string> desc;
+    in property <bool> selected;
+    in property <bool> enabled: true;
+    callback clicked;
+
+    height: 60px;
+    border-radius: 12px;
+    background: Palette.alternate-background;
+    border-width: root.selected ? 2px : 1px;
+    border-color: root.selected ? Palette.accent-background : Palette.border;
+    drop-shadow-blur: root.selected ? 12px : 0px;
+    drop-shadow-color: #00000022;
+    drop-shadow-offset-y: 2px;
+    opacity: root.enabled ? 1.0 : 0.5;
+
+    ta := TouchArea {
+        enabled: root.enabled;
+        mouse-cursor: pointer;
+        clicked => {
+            root.clicked();
+        }
+    }
+
+    HorizontalLayout {
+        padding-left: 14px;
+        padding-right: 16px;
+        spacing: 12px;
+
+        // radio indicator
+        VerticalLayout {
+            alignment: center;
+            Rectangle {
+                width: 20px;
+                height: 20px;
+                border-radius: 10px;
+                border-width: 2px;
+                border-color: root.selected ? Palette.accent-background : Palette.border;
+                Rectangle {
+                    width: 10px;
+                    height: 10px;
+                    border-radius: 5px;
+                    background: Palette.accent-background;
+                    visible: root.selected;
+                }
+            }
+        }
+
+        VerticalLayout {
+            alignment: center;
+            spacing: 3px;
+            Text {
+                text: root.title;
+                font-size: 14px;
+                font-weight: 600;
+                color: Palette.foreground;
+            }
+            Text {
+                text: root.desc;
+                font-size: 11px;
+                color: Palette.foreground;
+                opacity: 0.55;
+                overflow: elide;
+            }
+        }
+    }
+}
+
+export component AppWindow inherits Window {
+    title: "Folder Lock";
+    icon: @image-url("../assets/icon.png");
+    default-font-family: "Microsoft YaHei";
+    default-font-size: 14px;
+    preferred-width: 480px;
+    preferred-height: 660px;
+    min-width: 440px;
+    min-height: 600px;
+    background: Palette.background;
+
+    // ── inputs driven from Rust ──
+    in property <string> folder-path;
+    in property <bool> locked;
+    in property <string> detected-mode;
+    in property <string> message;
+    in property <bool> is-error;
+    in property <bool> busy;
+
+    // ── local UI state ──
+    property <int> mode-index: 2;
+    in-out property <string> pw1;
+    in-out property <string> pw2;
+    property <bool> confirming;
+
+    // ── callbacks into Rust ──
+    callback encrypt(int, string, string);
+    callback decrypt(string);
+
+    // ═══════════════════════════════════════════ main content
+    VerticalLayout {
+        width: 100%;
+        height: 100%;
+        padding: 28px;
+        spacing: 20px;
+
+        // ── header ──
+        HorizontalLayout {
+            spacing: 14px;
+            vertical-stretch: 0;
+
+            Rectangle {
+                width: 52px;
+                height: 52px;
+                border-radius: 14px;
+                background: Palette.accent-background;
+                drop-shadow-blur: 14px;
+                drop-shadow-color: #00000033;
+                drop-shadow-offset-y: 3px;
+                LockIcon {
+                    ink: Palette.accent-foreground;
+                    hole: Palette.accent-background;
+                }
+            }
+
+            VerticalLayout {
+                alignment: center;
+                spacing: 2px;
+                Text {
+                    text: "Folder Lock";
+                    font-size: 22px;
+                    font-weight: 700;
+                    color: Palette.foreground;
+                }
+                Text {
+                    text: root.locked ? "此文件夹已加密锁定" : "保护此文件夹内的所有文件";
+                    font-size: 13px;
+                    color: Palette.foreground;
+                    opacity: 0.6;
+                }
+            }
+        }
+
+        // ── folder path card ──
+        Rectangle {
+            vertical-stretch: 0;
+            height: 50px;
+            border-radius: 10px;
+            background: Palette.alternate-background;
+            border-width: 1px;
+            border-color: Palette.border;
+            HorizontalLayout {
+                padding-left: 16px;
+                padding-right: 16px;
+                spacing: 10px;
+                VerticalLayout {
+                    alignment: center;
+                    Rectangle {
+                        width: 8px;
+                        height: 8px;
+                        border-radius: 4px;
+                        background: root.locked ? #e0a63a : #37a86b;
+                    }
+                }
+                Text {
+                    text: root.folder-path;
+                    font-size: 12px;
+                    color: Palette.foreground;
+                    opacity: 0.75;
+                    vertical-alignment: center;
+                    overflow: elide;
+                }
+            }
+        }
+
+        // ── ENCRYPT body (folder unlocked) ──
+        if !root.locked : VerticalLayout {
+            spacing: 12px;
+            vertical-stretch: 0;
+
+            Text {
+                text: "选择加密模式";
+                font-size: 13px;
+                font-weight: 600;
+                color: Palette.foreground;
+            }
+            ModeCard {
+                title: "完全加密";
+                desc: "AES-256-GCM 逐文件加密 · 安全性最高";
+                selected: root.mode-index == 0;
+                enabled: !root.busy;
+                clicked => {
+                    root.mode-index = 0;
+                }
+            }
+            ModeCard {
+                title: "简单加密";
+                desc: "NTFS 隐藏 · 快速 · 内容不加密";
+                selected: root.mode-index == 1;
+                enabled: !root.busy;
+                clicked => {
+                    root.mode-index = 1;
+                }
+            }
+            ModeCard {
+                title: "极速锁定";
+                desc: "瞬时移动 + 权限锁 · 任意大小秒完成";
+                selected: root.mode-index == 2;
+                enabled: !root.busy;
+                clicked => {
+                    root.mode-index = 2;
+                }
+            }
+
+            LineEdit {
+                placeholder-text: "设置密码";
+                input-type: password;
+                text <=> root.pw1;
+                enabled: !root.busy;
+            }
+            LineEdit {
+                placeholder-text: "确认密码";
+                input-type: password;
+                text <=> root.pw2;
+                enabled: !root.busy;
+            }
+            Button {
+                text: "加密并锁定";
+                primary: true;
+                height: 42px;
+                enabled: !root.busy;
+                clicked => {
+                    root.confirming = true;
+                }
+            }
+        }
+
+        // ── DECRYPT body (folder locked) ──
+        if root.locked : VerticalLayout {
+            spacing: 12px;
+            vertical-stretch: 0;
+
+            Text {
+                text: "检测到加密模式：" + root.detected-mode;
+                font-size: 13px;
+                color: Palette.foreground;
+                opacity: 0.7;
+            }
+            LineEdit {
+                placeholder-text: "输入密码以解锁";
+                input-type: password;
+                text <=> root.pw1;
+                enabled: !root.busy;
+                accepted => {
+                    if (!root.busy) {
+                        root.decrypt(root.pw1);
+                    }
+                }
+            }
+            Button {
+                text: "解密并解锁";
+                primary: true;
+                height: 42px;
+                enabled: !root.busy;
+                clicked => {
+                    root.decrypt(root.pw1);
+                }
+            }
+        }
+
+        // flexible spacer pushes status to the bottom
+        Rectangle { vertical-stretch: 1; }
+
+        // ── busy indicator ──
+        if root.busy : HorizontalLayout {
+            spacing: 10px;
+            vertical-stretch: 0;
+            Spinner {
+                indeterminate: true;
+                width: 20px;
+                height: 20px;
+            }
+            Text {
+                text: "正在处理，请稍候…";
+                vertical-alignment: center;
+                color: Palette.foreground;
+            }
+        }
+
+        // ── status / result message ──
+        if root.message != "" : Text {
+            text: root.message;
+            wrap: word-wrap;
+            vertical-stretch: 0;
+            color: root.is-error ? #e05a5a : #37a86b;
+            font-size: 13px;
+        }
+    }
+
+    // ═══════════════════════════════════════════ confirm overlay
+    if root.confirming : Rectangle {
+        width: 100%;
+        height: 100%;
+        background: #00000099;
+
+        // absorb clicks on the backdrop
+        TouchArea {}
+
+        Rectangle {
+            width: 360px;
+            height: 220px;
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            border-radius: 16px;
+            background: Palette.background;
+            border-width: 1px;
+            border-color: Palette.border;
+            drop-shadow-blur: 30px;
+            drop-shadow-color: #00000055;
+            drop-shadow-offset-y: 8px;
+
+            VerticalLayout {
+                padding: 24px;
+                spacing: 14px;
+
+                Text {
+                    text: "确认加密？";
+                    font-size: 18px;
+                    font-weight: 700;
+                    color: Palette.foreground;
+                }
+                Text {
+                    text: "原始文件将被移动 / 加密并删除，仅保留加密数据。\n请务必牢记密码，密码丢失将无法恢复！";
+                    wrap: word-wrap;
+                    font-size: 13px;
+                    color: Palette.foreground;
+                    opacity: 0.75;
+                }
+                Rectangle { vertical-stretch: 1; }
+                HorizontalLayout {
+                    spacing: 12px;
+                    alignment: end;
+                    Button {
+                        text: "取消";
+                        clicked => {
+                            root.confirming = false;
+                        }
+                    }
+                    Button {
+                        text: "确认加密";
+                        primary: true;
+                        clicked => {
+                            root.confirming = false;
+                            root.encrypt(root.mode-index, root.pw1, root.pw2);
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

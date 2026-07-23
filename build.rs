@@ -8,13 +8,21 @@
 use std::path::Path;
 
 fn main() {
-    // Generate the icon into assets/ (where build.rc references it).
+    // Generate the icon into assets/ first: build.rc references icon.ico and
+    // the Slint window references icon.png (via @image-url), so both must
+    // exist before the resource compile / slint compile below.
     let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap();
     let assets_dir = Path::new(&manifest_dir).join("assets");
     std::fs::create_dir_all(&assets_dir).ok();
     let icon_path = assets_dir.join("icon.ico");
+    let png_path = assets_dir.join("icon.png");
 
-    generate_icon(&icon_path);
+    generate_icon(&icon_path, &png_path);
+
+    // Compile the Slint UI markup into generated Rust (included via
+    // slint::include_modules!() in main.rs). Its window icon embeds
+    // assets/icon.png generated just above.
+    slint_build::compile("ui/app.slint").expect("slint compile failed");
 
     // Help embed-resource find windres from LLVM MinGW.
     prepend_windres_to_path();
@@ -27,6 +35,7 @@ fn main() {
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-changed=build.rc");
     println!("cargo:rerun-if-changed=assets/manifest.xml");
+    println!("cargo:rerun-if-changed=ui/app.slint");
 }
 
 /// Find the LLVM MinGW windres install and prepend its directory to PATH.
@@ -53,10 +62,19 @@ fn prepend_windres_to_path() {
 ///   - Folder body: a yellow-tan rounded rectangle with a tab on top-left
 ///   - Padlock: overlaid in the lower-right area, silver/gray body with
 ///     a dark shackle and keyhole
-fn generate_icon(path: &Path) {
+fn generate_icon(ico_path: &Path, png_path: &Path) {
     let image = draw_icon(48);
     let image_32 = draw_icon(32);
-    save_as_ico(path, &[(&image, 48), (&image_32, 32)]);
+    save_as_ico(ico_path, &[(&image, 48), (&image_32, 32)]);
+
+    // Standalone PNG used as the Slint window (title-bar) icon. Written only
+    // when the bytes actually change, so Slint's dependency tracking on the
+    // image file doesn't trigger an endless rebuild loop.
+    let png = png_encode(&image);
+    let unchanged = std::fs::read(png_path).map(|old| old == png).unwrap_or(false);
+    if !unchanged {
+        std::fs::write(png_path, &png).expect("failed to write icon.png");
+    }
 }
 
 fn draw_icon(size: u32) -> image::RgbaImage {
