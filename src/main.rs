@@ -40,11 +40,12 @@ impl Drop for Stash {
 }
 
 fn main() {
-    // The folder the exe lives in (current working directory).
-    let folder = match std::env::current_dir() {
-        Ok(f) if f.is_dir() => Arc::new(f),
+    // The folder the exe actually lives in (not the current working directory,
+    // which can differ when launched by full path from another location).
+    let folder = match exe_dir() {
+        Some(f) if f.is_dir() => Arc::new(f),
         _ => {
-            fatal("程序必须在某个文件夹内运行。");
+            fatal("无法确定程序所在文件夹。");
             return;
         }
     };
@@ -286,4 +287,13 @@ fn fatal(msg: &str) {
 #[cfg(not(windows))]
 fn fatal(msg: &str) {
     eprintln!("folder_lock 错误: {}", msg);
+}
+
+/// The directory the running executable actually lives in. Unlike the current
+/// working directory, this stays correct even when the exe is launched by full
+/// path from another location.
+fn exe_dir() -> Option<std::path::PathBuf> {
+    std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(|p| p.to_path_buf()))
 }

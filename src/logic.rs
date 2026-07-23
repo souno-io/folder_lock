@@ -137,7 +137,15 @@ fn run_attrib(path: &Path, flags: &[&str]) {
     let _ = cmd.output();
 }
 
-/// Ask Explorer to refresh the folder so the icon change shows immediately.
+/// Ask Explorer to refresh the folder icon so the change shows immediately.
+///
+/// The folder's icon is drawn by its *parent* view, so notifying only the
+/// folder's own contents (SHCNE_UPDATEDIR on itself) is not enough. We flag the
+/// folder as a changed item (SHCNE_UPDATEITEM) and refresh the parent listing
+/// (SHCNE_UPDATEDIR). On Windows 10/11 the per-folder icon is cached hard, so a
+/// targeted notify is frequently ignored; we finish with SHCNE_ASSOCCHANGED,
+/// which flushes the shell icon cache and forces Explorer to re-read
+/// desktop.ini. All calls flush so they take effect right away.
 #[cfg(windows)]
 fn notify_shell(folder: &Path) {
     use std::os::windows::ffi::OsStrExt;
@@ -152,17 +160,46 @@ fn notify_shell(folder: &Path) {
         );
     }
     const SHCNE_UPDATEDIR: i32 = 0x0000_1000;
+    const SHCNE_UPDATEITEM: i32 = 0x0000_2000;
+    const SHCNE_ASSOCCHANGED: i32 = 0x0800_0000;
+    const SHCNF_IDLIST: u32 = 0x0000;
     const SHCNF_PATHW: u32 = 0x0005;
-    let wide: Vec<u16> = folder
-        .as_os_str()
-        .encode_wide()
-        .chain(std::iter::once(0))
-        .collect();
+    const SHCNF_FLUSH: u32 = 0x1000;
+
+    let to_wide = |p: &Path| -> Vec<u16> {
+        p.as_os_str().encode_wide().chain(std::iter::once(0)).collect()
+    };
+
+    // The folder itself changed (its icon).
+    let w_folder = to_wide(folder);
     unsafe {
         SHChangeNotify(
-            SHCNE_UPDATEDIR,
-            SHCNF_PATHW,
-            wide.as_ptr() as *const core::ffi::c_void,
+            SHCNE_UPDATEITEM,
+            SHCNF_PATHW | SHCNF_FLUSH,
+            w_folder.as_ptr() as *const core::ffi::c_void,
+            std::ptr::null(),
+        );
+    }
+    // The parent listing (where the folder's icon is actually drawn).
+    if let Some(parent) = folder.parent() {
+        let w_parent = to_wide(parent);
+        unsafe {
+            SHChangeNotify(
+                SHCNE_UPDATEDIR,
+                SHCNF_PATHW | SHCNF_FLUSH,
+                w_parent.as_ptr() as *const core::ffi::c_void,
+                std::ptr::null(),
+            );
+        }
+    }
+    // Flush the global shell icon cache. Windows 10/11 caches folder icons hard
+    // and ignores targeted notifications for an already-rendered folder; this is
+    // the reliable way to make the new (or restored) icon appear at once.
+    unsafe {
+        SHChangeNotify(
+            SHCNE_ASSOCCHANGED,
+            SHCNF_IDLIST | SHCNF_FLUSH,
+            std::ptr::null(),
             std::ptr::null(),
         );
     }
