@@ -208,6 +208,17 @@ fn serialize_manifest_full(entries: &[Entry]) -> Vec<u8> {
 
 /// Full encryption: read & AES-256-GCM encrypt every file into the vault.
 pub fn encrypt_folder(folder: &Path, key: &Key, salt: &Salt) -> Result<usize, String> {
+    encrypt_folder_with_progress(folder, key, salt, &|_, _| {})
+}
+
+/// Same as [`encrypt_folder`], but reports `(done, total)` after each file so a
+/// GUI can drive a progress bar. `progress` is called from the calling thread.
+pub fn encrypt_folder_with_progress(
+    folder: &Path,
+    key: &Key,
+    salt: &Salt,
+    progress: &dyn Fn(usize, usize),
+) -> Result<usize, String> {
     let mut dirs: Vec<PathBuf> = Vec::new();
     let mut files: Vec<PathBuf> = Vec::new();
     collect_tree(folder, &mut dirs, &mut files)?;
@@ -216,6 +227,7 @@ pub fn encrypt_folder(folder: &Path, key: &Key, salt: &Salt) -> Result<usize, St
 
     let mut entries: Vec<Entry> = Vec::new();
     let mut count = 0usize;
+    let total = files.len();
 
     for d in &dirs {
         entries.push(Entry::Dir { rel: rel_path(folder, d)? });
@@ -229,6 +241,7 @@ pub fn encrypt_folder(folder: &Path, key: &Key, salt: &Salt) -> Result<usize, St
         let cipher = crypto::encrypt(key, &data)?;
         entries.push(Entry::File { rel, cipher });
         count += 1;
+        progress(count, total);
     }
 
     if entries.is_empty() {
@@ -243,7 +256,12 @@ pub fn encrypt_folder(folder: &Path, key: &Key, salt: &Salt) -> Result<usize, St
     Ok(count)
 }
 
-fn decrypt_folder_full(folder: &Path, key: &Key, manifest: &[u8]) -> Result<usize, String> {
+fn decrypt_folder_full(
+    folder: &Path,
+    key: &Key,
+    manifest: &[u8],
+    progress: &dyn Fn(usize, usize),
+) -> Result<usize, String> {
     if manifest.len() < 8 + 2 + 4 {
         return Err("vault 数据损坏".into());
     }
@@ -255,7 +273,7 @@ fn decrypt_folder_full(folder: &Path, key: &Key, manifest: &[u8]) -> Result<usiz
     let mut created: BTreeSet<PathBuf> = BTreeSet::new();
     let mut file_count = 0usize;
 
-    for _ in 0..count {
+    for i in 0..count {
         let (plen, consumed) = read_u32(manifest, pos)?;
         pos += consumed;
         let rel_bytes = manifest.get(pos..pos + plen as usize).ok_or("vault 数据损坏 (path)")?;
@@ -294,6 +312,7 @@ fn decrypt_folder_full(folder: &Path, key: &Key, manifest: &[u8]) -> Result<usiz
             created.insert(target);
             file_count += 1;
         }
+        progress(i + 1, count);
     }
 
     let _ = created;
@@ -329,6 +348,18 @@ fn serialize_manifest_simple(magic: &[u8; 8], entries: &[SimpleEntry]) -> Vec<u8
 /// Simple encryption: move each file's bytes into an ADS on the host file,
 /// delete the original. Instant regardless of file size. NTFS only.
 pub fn encrypt_folder_simple(folder: &Path, key: &Key, salt: &Salt) -> Result<usize, String> {
+    encrypt_folder_simple_with_progress(folder, key, salt, &|_, _| {})
+}
+
+/// Same as [`encrypt_folder_simple`], but reports `(done, total)` after each
+/// file so a GUI can drive a progress bar. `progress` is called from the
+/// calling thread.
+pub fn encrypt_folder_simple_with_progress(
+    folder: &Path,
+    key: &Key,
+    salt: &Salt,
+    progress: &dyn Fn(usize, usize),
+) -> Result<usize, String> {
     let mut dirs: Vec<PathBuf> = Vec::new();
     let mut files: Vec<PathBuf> = Vec::new();
     collect_tree(folder, &mut dirs, &mut files)?;
@@ -338,6 +369,8 @@ pub fn encrypt_folder_simple(folder: &Path, key: &Key, salt: &Salt) -> Result<us
     if dirs.is_empty() && files.is_empty() {
         return Ok(0);
     }
+
+    let total = files.len();
 
     // Create the host file that will carry all ADS streams.
     let host_path = folder.join(HOST_FILE);
@@ -384,6 +417,7 @@ pub fn encrypt_folder_simple(folder: &Path, key: &Key, salt: &Salt) -> Result<us
             stream: Some(stream_name),
         });
         count += 1;
+        progress(count, total);
     }
 
     if entries.is_empty() {
@@ -400,7 +434,12 @@ pub fn encrypt_folder_simple(folder: &Path, key: &Key, salt: &Salt) -> Result<us
     Ok(count)
 }
 
-fn decrypt_folder_simple(folder: &Path, _key: &Key, manifest: &[u8]) -> Result<usize, String> {
+fn decrypt_folder_simple(
+    folder: &Path,
+    _key: &Key,
+    manifest: &[u8],
+    progress: &dyn Fn(usize, usize),
+) -> Result<usize, String> {
     if manifest.len() < 8 + 2 + 4 {
         return Err("vault 数据损坏".into());
     }
@@ -412,7 +451,7 @@ fn decrypt_folder_simple(folder: &Path, _key: &Key, manifest: &[u8]) -> Result<u
     let host_path = folder.join(HOST_FILE);
     let mut file_count = 0usize;
 
-    for _ in 0..count {
+    for i in 0..count {
         let (plen, consumed) = read_u32(manifest, pos)?;
         pos += consumed;
         let rel_bytes = manifest.get(pos..pos + plen as usize).ok_or("vault 数据损坏 (path)")?;
@@ -462,6 +501,7 @@ fn decrypt_folder_simple(folder: &Path, _key: &Key, manifest: &[u8]) -> Result<u
             let _ = fs::remove_file(&ads_path);
             file_count += 1;
         }
+        progress(i + 1, count);
     }
 
     // Remove the host file and vault.
@@ -607,6 +647,17 @@ fn write_vault(folder: &Path, salt: &Salt, mode: u8, manifest_ct: &[u8]) -> Resu
 /// Decrypt the vault, auto-detecting full vs simple mode.
 /// Returns the number of files restored.
 pub fn decrypt_folder(folder: &Path, key: &Key) -> Result<usize, String> {
+    decrypt_folder_with_progress(folder, key, &|_, _| {})
+}
+
+/// Same as [`decrypt_folder`], but reports `(done, total)` after each entry so
+/// a GUI can drive a progress bar. The instant move-lock mode does not report
+/// per-entry progress. `progress` is called from the calling thread.
+pub fn decrypt_folder_with_progress(
+    folder: &Path,
+    key: &Key,
+    progress: &dyn Fn(usize, usize),
+) -> Result<usize, String> {
     let vault_path = folder.join(VAULT_FILE);
     let mut buf = Vec::new();
     File::open(&vault_path)
@@ -621,8 +672,8 @@ pub fn decrypt_folder(folder: &Path, key: &Key) -> Result<usize, String> {
     let manifest = crypto::decrypt(key, manifest_ct)?;
 
     let result = match mode {
-        MODE_FULL => decrypt_folder_full(folder, key, &manifest),
-        MODE_SIMPLE => decrypt_folder_simple(folder, key, &manifest),
+        MODE_FULL => decrypt_folder_full(folder, key, &manifest, progress),
+        MODE_SIMPLE => decrypt_folder_simple(folder, key, &manifest, progress),
         MODE_MOVE => decrypt_folder_move(folder, key, &manifest),
         _ => Err(format!("未知的 vault 模式: {}", mode)),
     };

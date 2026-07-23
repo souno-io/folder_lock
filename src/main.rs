@@ -18,6 +18,7 @@
 mod logic;
 
 use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use slint::ComponentHandle;
 
@@ -92,12 +93,29 @@ fn main() {
             }
             app.set_busy(true);
             app.set_message("".into());
+            app.set_busy_label("正在加密…".into());
+            app.set_progress(0.0);
+            app.set_percent(0);
 
             let folder = folder.clone();
             let pw = pw1.to_string();
             let weak2 = weak.clone();
             std::thread::spawn(move || {
-                let result = logic::encrypt(&folder, mode, pw.as_bytes());
+                // Report progress back to the UI, throttled to whole-percent
+                // changes so we don't flood the event loop.
+                let last = AtomicUsize::new(usize::MAX);
+                let weak3 = weak2.clone();
+                let progress = move |done: usize, total: usize| {
+                    let pct = if total == 0 { 0 } else { done * 100 / total };
+                    if last.swap(pct, Ordering::Relaxed) == pct {
+                        return;
+                    }
+                    let _ = weak3.upgrade_in_event_loop(move |app| {
+                        app.set_progress(pct as f32 / 100.0);
+                        app.set_percent(pct as i32);
+                    });
+                };
+                let result = logic::encrypt(&folder, mode, pw.as_bytes(), &progress);
                 let _ = weak2.upgrade_in_event_loop(move |app| {
                     app.set_busy(false);
                     app.set_pw1("".into());
@@ -134,12 +152,27 @@ fn main() {
             }
             app.set_busy(true);
             app.set_message("".into());
+            app.set_busy_label("正在解密…".into());
+            app.set_progress(0.0);
+            app.set_percent(0);
 
             let folder = folder.clone();
             let pw = pw.to_string();
             let weak2 = weak.clone();
             std::thread::spawn(move || {
-                let result = logic::decrypt(&folder, pw.as_bytes());
+                let last = AtomicUsize::new(usize::MAX);
+                let weak3 = weak2.clone();
+                let progress = move |done: usize, total: usize| {
+                    let pct = if total == 0 { 0 } else { done * 100 / total };
+                    if last.swap(pct, Ordering::Relaxed) == pct {
+                        return;
+                    }
+                    let _ = weak3.upgrade_in_event_loop(move |app| {
+                        app.set_progress(pct as f32 / 100.0);
+                        app.set_percent(pct as i32);
+                    });
+                };
+                let result = logic::decrypt(&folder, pw.as_bytes(), &progress);
                 let _ = weak2.upgrade_in_event_loop(move |app| {
                     app.set_busy(false);
                     match result {
@@ -175,6 +208,9 @@ fn main() {
             }
             app.set_busy(true);
             app.set_message("".into());
+            app.set_busy_label("正在解密…".into());
+            app.set_progress(0.0);
+            app.set_percent(0);
 
             let folder = folder.clone();
             let pw = pw.to_string();
@@ -182,7 +218,19 @@ fn main() {
             let stash = stash.clone();
             std::thread::spawn(move || {
                 let mode = logic::detect_mode(&folder).unwrap_or(logic::MODE_MOVE);
-                let result = logic::decrypt(&folder, pw.as_bytes());
+                let last = AtomicUsize::new(usize::MAX);
+                let weak3 = weak2.clone();
+                let progress = move |done: usize, total: usize| {
+                    let pct = if total == 0 { 0 } else { done * 100 / total };
+                    if last.swap(pct, Ordering::Relaxed) == pct {
+                        return;
+                    }
+                    let _ = weak3.upgrade_in_event_loop(move |app| {
+                        app.set_progress(pct as f32 / 100.0);
+                        app.set_percent(pct as i32);
+                    });
+                };
+                let result = logic::decrypt(&folder, pw.as_bytes(), &progress);
                 let _ = weak2.upgrade_in_event_loop(move |app| {
                     app.set_busy(false);
                     match result {
@@ -226,13 +274,28 @@ fn main() {
             };
             app.set_busy(true);
             app.set_message("".into());
+            app.set_busy_label("正在加密…".into());
+            app.set_progress(0.0);
+            app.set_percent(0);
 
             let folder = folder.clone();
             let weak2 = weak.clone();
             let stash = stash.clone();
             std::thread::spawn(move || {
                 let mode = creds.mode;
-                let result = logic::encrypt(&folder, mode, &creds.pw);
+                let last = AtomicUsize::new(usize::MAX);
+                let weak3 = weak2.clone();
+                let progress = move |done: usize, total: usize| {
+                    let pct = if total == 0 { 0 } else { done * 100 / total };
+                    if last.swap(pct, Ordering::Relaxed) == pct {
+                        return;
+                    }
+                    let _ = weak3.upgrade_in_event_loop(move |app| {
+                        app.set_progress(pct as f32 / 100.0);
+                        app.set_percent(pct as i32);
+                    });
+                };
+                let result = logic::encrypt(&folder, mode, &creds.pw, &progress);
                 let _ = weak2.upgrade_in_event_loop(move |app| {
                     app.set_busy(false);
                     match result {

@@ -55,16 +55,23 @@ pub fn has_packable_content(folder: &Path) -> bool {
 }
 
 /// Derive a key from `password` and encrypt the folder using the chosen mode.
-/// Returns the number of files processed.
-pub fn encrypt(folder: &Path, mode: i32, password: &[u8]) -> Result<usize, String> {
+/// Returns the number of files processed. `progress` is called with
+/// `(done, total)` after each file so a GUI can drive a progress bar (the
+/// instant move-lock mode does not report per-file progress).
+pub fn encrypt(
+    folder: &Path,
+    mode: i32,
+    password: &[u8],
+    progress: &dyn Fn(usize, usize),
+) -> Result<usize, String> {
     if !has_packable_content(folder) {
         return Err("当前文件夹没有可加密的文件。".into());
     }
     let salt = crypto::random_salt();
     let mut key = crypto::derive_key(password, &salt)?;
     let result = match mode {
-        MODE_FULL => vault::encrypt_folder(folder, &key, &salt),
-        MODE_SIMPLE => vault::encrypt_folder_simple(folder, &key, &salt),
+        MODE_FULL => vault::encrypt_folder_with_progress(folder, &key, &salt, progress),
+        MODE_SIMPLE => vault::encrypt_folder_simple_with_progress(folder, &key, &salt, progress),
         _ => vault::encrypt_folder_move(folder, &key, &salt),
     };
     crypto::zero_key(&mut key);
@@ -76,11 +83,17 @@ pub fn encrypt(folder: &Path, mode: i32, password: &[u8]) -> Result<usize, Strin
 }
 
 /// Derive a key from `password` and decrypt the folder (mode auto-detected).
-/// Returns the number of files restored.
-pub fn decrypt(folder: &Path, password: &[u8]) -> Result<usize, String> {
+/// Returns the number of files restored. `progress` is called with
+/// `(done, total)` after each entry so a GUI can drive a progress bar (the
+/// instant move-lock mode does not report per-entry progress).
+pub fn decrypt(
+    folder: &Path,
+    password: &[u8],
+    progress: &dyn Fn(usize, usize),
+) -> Result<usize, String> {
     let salt = vault::read_vault_salt(folder)?;
     let mut key = crypto::derive_key(password, &salt)?;
-    let result = vault::decrypt_folder(folder, &key);
+    let result = vault::decrypt_folder_with_progress(folder, &key, progress);
     crypto::zero_key(&mut key);
     if result.is_ok() {
         // Restore the folder's default Explorer icon.

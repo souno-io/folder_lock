@@ -5,7 +5,7 @@
 // Windows install) to guarantee correct glyph rendering. The lock glyph is a
 // vector `Path`, so it stays crisp at any DPI and needs no image asset.
 
-import { Button, LineEdit, Spinner, Palette } from "std-widgets.slint";
+import { Button, LineEdit, Spinner, ProgressIndicator, Palette } from "std-widgets.slint";
 
 // ─────────────────────────────────────────── vector lock glyph
 // Drawn inside a 24×24 box: a stroked shackle (open arc) + a solid body with a
@@ -132,6 +132,13 @@ export component AppWindow inherits Window {
     in property <string> message;
     in property <bool> is-error;
     in property <bool> busy;
+    // Encryption progress: `progress` is 0.0‥1.0 for the bar, `percent` the
+    // matching whole-number percentage for the label. Both stay 0 for the
+    // instant move-lock mode, which shows an indeterminate spinner instead.
+    // `busy-label` describes the current long operation (加密 / 解密).
+    in property <float> progress;
+    in property <int> percent;
+    in property <string> busy-label: "正在处理…";
 
     // ── local UI state ──
     property <int> mode-index: 2;
@@ -360,15 +367,36 @@ export component AppWindow inherits Window {
         if root.busy : HorizontalLayout {
             spacing: 10px;
             vertical-stretch: 0;
-            Spinner {
+            if root.progress <= 0 : Spinner {
                 indeterminate: true;
                 width: 20px;
                 height: 20px;
             }
-            Text {
+            if root.progress <= 0 : Text {
                 text: "正在处理，请稍候…";
                 vertical-alignment: center;
                 color: Palette.foreground;
+            }
+            if root.progress > 0 : VerticalLayout {
+                spacing: 6px;
+                horizontal-stretch: 1;
+                HorizontalLayout {
+                    Text {
+                        text: root.busy-label;
+                        vertical-alignment: center;
+                        color: Palette.foreground;
+                    }
+                    Rectangle { horizontal-stretch: 1; }
+                    Text {
+                        text: "\{root.percent}%";
+                        vertical-alignment: center;
+                        color: Palette.foreground;
+                    }
+                }
+                ProgressIndicator {
+                    height: 6px;
+                    progress: root.progress;
+                }
             }
         }
 
