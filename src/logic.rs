@@ -33,6 +33,12 @@ pub fn detect_mode_label(folder: &Path) -> String {
     }
 }
 
+/// Numeric mode of an existing vault, so “再次加密” can re-lock with the same
+/// mode without asking the user again.
+pub fn detect_mode(folder: &Path) -> Option<i32> {
+    vault::read_vault_mode(folder).ok().map(|m| m as i32)
+}
+
 /// Is there at least one non-protected file/dir in the folder?
 pub fn has_packable_content(folder: &Path) -> bool {
     let Ok(rd) = std::fs::read_dir(folder) else {
@@ -62,6 +68,10 @@ pub fn encrypt(folder: &Path, mode: i32, password: &[u8]) -> Result<usize, Strin
         _ => vault::encrypt_folder_move(folder, &key, &salt),
     };
     crypto::zero_key(&mut key);
+    if result.is_ok() {
+        // Give the locked folder the app's own icon in Explorer.
+        set_folder_icon(folder);
+    }
     result
 }
 
@@ -72,5 +82,94 @@ pub fn decrypt(folder: &Path, password: &[u8]) -> Result<usize, String> {
     let mut key = crypto::derive_key(password, &salt)?;
     let result = vault::decrypt_folder(folder, &key);
     crypto::zero_key(&mut key);
+    if result.is_ok() {
+        // Restore the folder's default Explorer icon.
+        clear_folder_icon(folder);
+    }
     result
 }
+
+// ─────────────────────────────────────── Windows folder icon ──
+// A locked folder is given the app's icon via a hidden desktop.ini. The
+// folder is marked read-only (the flag Explorer reads as "this folder is
+// customized"); the ini itself is hidden + system. Everything is best-effort:
+// icon styling must never fail a lock/unlock operation.
+
+/// Point the folder's Explorer icon at the running exe (locked look).
+#[cfg(windows)]
+pub fn set_folder_icon(folder: &Path) {
+    let Ok(exe) = std::env::current_exe() else {
+        return;
+    };
+    let ini = folder.join("desktop.ini");
+    // Clear attributes first so we can overwrite an existing ini.
+    run_attrib(&ini, &["-s", "-h", "-r"]);
+    let content = format!(
+        "[.ShellClassInfo]\r\nIconResource={},0\r\nConfirmFileOp=0\r\n",
+        exe.display()
+    );
+    if std::fs::write(&ini, content).is_err() {
+        return;
+    }
+    run_attrib(&ini, &["+s", "+h"]);
+    run_attrib(folder, &["+r"]);
+    notify_shell(folder);
+}
+
+/// Restore the folder's default Explorer icon (unlocked look).
+#[cfg(windows)]
+pub fn clear_folder_icon(folder: &Path) {
+    let ini = folder.join("desktop.ini");
+    run_attrib(&ini, &["-s", "-h", "-r"]);
+    let _ = std::fs::remove_file(&ini);
+    run_attrib(folder, &["-r"]);
+    notify_shell(folder);
+}
+
+#[cfg(windows)]
+fn run_attrib(path: &Path, flags: &[&str]) {
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    let mut cmd = std::process::Command::new("attrib");
+    cmd.args(flags);
+    cmd.arg(path.as_os_str());
+    cmd.creation_flags(CREATE_NO_WINDOW);
+    let _ = cmd.output();
+}
+
+/// Ask Explorer to refresh the folder so the icon change shows immediately.
+#[cfg(windows)]
+fn notify_shell(folder: &Path) {
+    use std::os::windows::ffi::OsStrExt;
+
+    #[link(name = "shell32")]
+    unsafe extern "system" {
+        fn SHChangeNotify(
+            event: i32,
+            flags: u32,
+            item1: *const core::ffi::c_void,
+            item2: *const core::ffi::c_void,
+        );
+    }
+    const SHCNE_UPDATEDIR: i32 = 0x0000_1000;
+    const SHCNF_PATHW: u32 = 0x0005;
+    let wide: Vec<u16> = folder
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    unsafe {
+        SHChangeNotify(
+            SHCNE_UPDATEDIR,
+            SHCNF_PATHW,
+            wide.as_ptr() as *const core::ffi::c_void,
+            std::ptr::null(),
+        );
+    }
+}
+
+#[cfg(not(windows))]
+pub fn set_folder_icon(_folder: &Path) {}
+
+#[cfg(not(windows))]
+pub fn clear_folder_icon(_folder: &Path) {}

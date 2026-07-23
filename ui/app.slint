@@ -127,6 +127,7 @@ export component AppWindow inherits Window {
     // ── inputs driven from Rust ──
     in property <string> folder-path;
     in property <bool> locked;
+    in property <bool> temp-unlocked;
     in property <string> detected-mode;
     in property <string> message;
     in property <bool> is-error;
@@ -141,6 +142,8 @@ export component AppWindow inherits Window {
     // ── callbacks into Rust ──
     callback encrypt(int, string, string);
     callback decrypt(string);
+    callback temp-decrypt(string);
+    callback re-encrypt();
 
     // ═══════════════════════════════════════════ main content
     VerticalLayout {
@@ -178,7 +181,7 @@ export component AppWindow inherits Window {
                     color: Palette.foreground;
                 }
                 Text {
-                    text: root.locked ? "此文件夹已加密锁定" : "保护此文件夹内的所有文件";
+                    text: root.locked ? "此文件夹已加密锁定" : root.temp-unlocked ? "已临时解密，可一键重新加密" : "保护此文件夹内的所有文件";
                     font-size: 13px;
                     color: Palette.foreground;
                     opacity: 0.6;
@@ -204,7 +207,7 @@ export component AppWindow inherits Window {
                         width: 8px;
                         height: 8px;
                         border-radius: 4px;
-                        background: root.locked ? #e0a63a : #37a86b;
+                        background: root.locked ? #e0a63a : root.temp-unlocked ? #4a90d9 : #37a86b;
                     }
                 }
                 Text {
@@ -218,8 +221,8 @@ export component AppWindow inherits Window {
             }
         }
 
-        // ── ENCRYPT body (folder unlocked) ──
-        if !root.locked : VerticalLayout {
+        // ── ENCRYPT body (fresh folder, no vault) ──
+        if !root.locked && !root.temp-unlocked : VerticalLayout {
             spacing: 12px;
             vertical-stretch: 0;
 
@@ -309,6 +312,43 @@ export component AppWindow inherits Window {
                 enabled: !root.busy;
                 clicked => {
                     root.decrypt(root.pw1);
+                }
+            }
+            Button {
+                text: "临时解密（用完可一键重新加密）";
+                enabled: !root.busy;
+                clicked => {
+                    root.temp-decrypt(root.pw1);
+                }
+            }
+            Text {
+                text: "“解密并解锁”会彻底解除加密；“临时解密”便于使用后快速复原。";
+                font-size: 11px;
+                color: Palette.foreground;
+                opacity: 0.55;
+                wrap: word-wrap;
+            }
+        }
+
+        // ── RE-ENCRYPT body (temporarily decrypted) ──
+        if root.temp-unlocked : VerticalLayout {
+            spacing: 12px;
+            vertical-stretch: 0;
+
+            Text {
+                text: "文件夹当前处于临时解密状态，可正常使用其中文件。";
+                font-size: 13px;
+                color: Palette.foreground;
+                opacity: 0.7;
+                wrap: word-wrap;
+            }
+            Button {
+                text: "再次加密";
+                primary: true;
+                height: 42px;
+                enabled: !root.busy;
+                clicked => {
+                    root.re-encrypt();
                 }
             }
         }

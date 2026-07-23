@@ -17,11 +17,27 @@
 
 mod logic;
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use slint::ComponentHandle;
 
 slint::include_modules!();
+
+/// Password + mode kept in memory while a folder is temporarily decrypted, so
+/// “再次加密” can re-lock without prompting again. Zeroized on drop.
+#[derive(Clone)]
+struct Stash {
+    pw: Vec<u8>,
+    mode: i32,
+}
+
+impl Drop for Stash {
+    fn drop(&mut self) {
+        for b in self.pw.iter_mut() {
+            *b = 0;
+        }
+    }
+}
 
 fn main() {
     // The folder the exe lives in (current working directory).
@@ -52,6 +68,10 @@ fn main() {
         app.set_message("选择加密模式并设置密码即可锁定此文件夹。".into());
     }
     app.set_is_error(false);
+    app.set_temp_unlocked(false);
+
+    // Credentials stashed during a temporary decrypt (for one-click re-lock).
+    let stash: Arc<Mutex<Option<Stash>>> = Arc::new(Mutex::new(None));
 
     // ── encrypt callback ──
     {
@@ -131,6 +151,102 @@ fn main() {
                             );
                         }
                         Err(e) => {
+                            app.set_is_error(true);
+                            app.set_message(e.into());
+                        }
+                    }
+                });
+            });
+        });
+    }
+
+    // ── temporary-decrypt callback (restore files, keep creds for re-lock) ──
+    {
+        let folder = folder.clone();
+        let weak = app.as_weak();
+        let stash = stash.clone();
+        app.on_temp_decrypt(move |pw| {
+            let Some(app) = weak.upgrade() else { return };
+            if pw.is_empty() {
+                app.set_message("请输入密码。".into());
+                app.set_is_error(true);
+                return;
+            }
+            app.set_busy(true);
+            app.set_message("".into());
+
+            let folder = folder.clone();
+            let pw = pw.to_string();
+            let weak2 = weak.clone();
+            let stash = stash.clone();
+            std::thread::spawn(move || {
+                let mode = logic::detect_mode(&folder).unwrap_or(logic::MODE_MOVE);
+                let result = logic::decrypt(&folder, pw.as_bytes());
+                let _ = weak2.upgrade_in_event_loop(move |app| {
+                    app.set_busy(false);
+                    match result {
+                        Ok(n) => {
+                            *stash.lock().unwrap() =
+                                Some(Stash { pw: pw.into_bytes(), mode });
+                            app.set_pw1("".into());
+                            app.set_locked(false);
+                            app.set_temp_unlocked(true);
+                            app.set_is_error(false);
+                            app.set_message(
+                                format!(
+                                    "已临时解密，共恢复 {} 个文件。使用完毕后点击“再次加密”即可重新锁定。",
+                                    n
+                                )
+                                .into(),
+                            );
+                        }
+                        Err(e) => {
+                            app.set_is_error(true);
+                            app.set_message(e.into());
+                        }
+                    }
+                });
+            });
+        });
+    }
+
+    // ── re-encrypt callback (re-lock using stashed creds, no password prompt) ──
+    {
+        let folder = folder.clone();
+        let weak = app.as_weak();
+        let stash = stash.clone();
+        app.on_re_encrypt(move || {
+            let Some(app) = weak.upgrade() else { return };
+            let creds = stash.lock().unwrap().clone();
+            let Some(creds) = creds else {
+                app.set_is_error(true);
+                app.set_message("凭据已失效，请重新输入密码解锁。".into());
+                return;
+            };
+            app.set_busy(true);
+            app.set_message("".into());
+
+            let folder = folder.clone();
+            let weak2 = weak.clone();
+            let stash = stash.clone();
+            std::thread::spawn(move || {
+                let mode = creds.mode;
+                let result = logic::encrypt(&folder, mode, &creds.pw);
+                let _ = weak2.upgrade_in_event_loop(move |app| {
+                    app.set_busy(false);
+                    match result {
+                        Ok(n) => {
+                            *stash.lock().unwrap() = None; // forget the password
+                            app.set_temp_unlocked(false);
+                            app.set_locked(true);
+                            app.set_detected_mode(logic::mode_label(mode).into());
+                            app.set_is_error(false);
+                            app.set_message(
+                                format!("已重新加密，共处理 {} 个文件。", n).into(),
+                            );
+                        }
+                        Err(e) => {
+                            // keep creds so the user can retry
                             app.set_is_error(true);
                             app.set_message(e.into());
                         }

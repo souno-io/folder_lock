@@ -143,6 +143,7 @@ pub fn is_protected_name(file_name: &str) -> bool {
         || lower == format!("{}.tmp", VAULT_FILE)
         || lower == HOST_FILE
         || lower == DATA_DIR
+        || lower == "desktop.ini"
         || lower.ends_with(".exe")
 }
 
