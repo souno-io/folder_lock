@@ -26,7 +26,7 @@ pub fn mode_label(mode: i32) -> &'static str {
 /// Label for the mode stored in an existing vault (used when decrypting).
 pub fn detect_mode_label(folder: &Path) -> String {
     match vault::read_vault_mode(folder) {
-        Ok(vault::MODE_FULL) => "完全加密".into(),
+        Ok(vault::MODE_FULL) | Ok(vault::MODE_FULL_STREAM) => "完全加密".into(),
         Ok(vault::MODE_SIMPLE) => "简单加密".into(),
         Ok(vault::MODE_MOVE) => "极速锁定".into(),
         _ => "未知".into(),
@@ -34,9 +34,15 @@ pub fn detect_mode_label(folder: &Path) -> String {
 }
 
 /// Numeric mode of an existing vault, so “再次加密” can re-lock with the same
-/// mode without asking the user again.
+/// mode without asking the user again. Maps the on-disk vault mode onto the
+/// UI ComboBox index (both streamed and legacy full map to “完全加密”).
 pub fn detect_mode(folder: &Path) -> Option<i32> {
-    vault::read_vault_mode(folder).ok().map(|m| m as i32)
+    vault::read_vault_mode(folder).ok().map(|m| match m {
+        vault::MODE_FULL | vault::MODE_FULL_STREAM => MODE_FULL,
+        vault::MODE_SIMPLE => MODE_SIMPLE,
+        vault::MODE_MOVE => MODE_MOVE,
+        _ => MODE_MOVE,
+    })
 }
 
 /// Is there at least one non-protected file/dir in the folder?
@@ -72,7 +78,7 @@ pub fn encrypt(
     let result = match mode {
         MODE_FULL => vault::encrypt_folder_with_progress(folder, &key, &salt, progress),
         MODE_SIMPLE => vault::encrypt_folder_simple_with_progress(folder, &key, &salt, progress),
-        _ => vault::encrypt_folder_move(folder, &key, &salt),
+        _ => vault::encrypt_folder_move_with_progress(folder, &key, &salt, progress),
     };
     crypto::zero_key(&mut key);
     if result.is_ok() {
@@ -100,6 +106,39 @@ pub fn decrypt(
         clear_folder_icon(folder);
     }
     result
+}
+
+// ─────────────────────────────────────── resume (crash recovery) ──
+
+/// Direction of an unfinished operation left in the folder, if any. Drives the
+/// "resume" prompt shown on startup.
+pub fn pending_op(folder: &Path) -> Option<vault::PendingOp> {
+    vault::read_pending(folder)
+}
+
+/// Resume an operation interrupted by a crash/kill/power-loss. Reads the
+/// direction from `.flockstate`, derives the key from `password` (validated
+/// against the vault via GCM), finishes the operation from where it stopped,
+/// and fixes up the folder icon. Returns `(direction, files_processed)`.
+pub fn resume(
+    folder: &Path,
+    password: &[u8],
+    progress: &dyn Fn(usize, usize),
+) -> Result<(vault::PendingOp, usize), String> {
+    let op = vault::read_pending(folder).ok_or("没有检测到未完成的操作。")?;
+    let salt = vault::read_vault_salt(folder)?;
+    let mut key = crypto::derive_key(password, &salt)?;
+    let result = match op {
+        vault::PendingOp::Encrypt => vault::resume_encrypt(folder, &key, progress),
+        vault::PendingOp::Decrypt => vault::decrypt_folder_with_progress(folder, &key, progress),
+    };
+    crypto::zero_key(&mut key);
+    let n = result?;
+    match op {
+        vault::PendingOp::Encrypt => set_folder_icon(folder),
+        vault::PendingOp::Decrypt => clear_folder_icon(folder),
+    }
+    Ok((op, n))
 }
 
 // ─────────────────────────────────────── Windows folder icon ──

@@ -62,15 +62,50 @@ fn main() {
     // ── initial state ──
     let locked = folder_lock::vault::vault_exists(&folder);
     app.set_folder_path(folder.display().to_string().into());
-    app.set_locked(locked);
-    if locked {
-        app.set_detected_mode(logic::detect_mode_label(&folder).into());
-        app.set_message("请输入密码以解锁此文件夹。".into());
-    } else {
-        app.set_message("选择加密模式并设置密码即可锁定此文件夹。".into());
+    // A leftover journal means a previous encrypt/decrypt was interrupted
+    // (crash / kill / power loss). Prompt for the password to resume from the
+    // exact breakpoint before offering the normal lock/unlock flow.
+    match logic::pending_op(&folder) {
+        Some(op) => {
+            let dir = match op {
+                folder_lock::vault::PendingOp::Encrypt => "加密",
+                folder_lock::vault::PendingOp::Decrypt => "解密",
+            };
+            app.set_locked(locked);
+            app.set_resuming(true);
+            app.set_detected_mode(logic::detect_mode_label(&folder).into());
+            app.set_message(
+                format!("检测到上次{}未完成，请输入密码以继续。", dir).into(),
+            );
+        }
+        None => {
+            app.set_locked(locked);
+            if locked {
+                app.set_detected_mode(logic::detect_mode_label(&folder).into());
+                app.set_message("请输入密码以解锁此文件夹。".into());
+            } else {
+                app.set_message("选择加密模式并设置密码即可锁定此文件夹。".into());
+            }
+        }
     }
     app.set_is_error(false);
     app.set_temp_unlocked(false);
+
+    // ── hard close-intercept: forbid closing while busy (encrypt/decrypt) ──
+    // Normal closes (X / Alt+F4) are blocked mid-operation; a Task-Manager kill
+    // or power loss still can't be caught — that's what resume-on-restart is for.
+    {
+        let weak_c = app.as_weak();
+        app.window().on_close_requested(move || match weak_c.upgrade() {
+            Some(a) if a.get_busy() => slint::CloseRequestResponse::KeepWindowShown,
+            _ => {
+                // Not busy: allow the close. `HideWindow` alone would leave the
+                // event loop (and thus the process) running, so quit explicitly.
+                let _ = slint::quit_event_loop();
+                slint::CloseRequestResponse::HideWindow
+            }
+        });
+    }
 
     // Credentials stashed during a temporary decrypt (for one-click re-lock).
     let stash: Arc<Mutex<Option<Stash>>> = Arc::new(Mutex::new(None));
@@ -311,6 +346,72 @@ fn main() {
                         }
                         Err(e) => {
                             // keep creds so the user can retry
+                            app.set_is_error(true);
+                            app.set_message(e.into());
+                        }
+                    }
+                });
+            });
+        });
+    }
+
+    // ── resume callback (finish an interrupted encrypt/decrypt) ──
+    {
+        let folder = folder.clone();
+        let weak = app.as_weak();
+        app.on_resume(move |pw| {
+            let Some(app) = weak.upgrade() else { return };
+            if pw.is_empty() {
+                app.set_message("请输入密码。".into());
+                app.set_is_error(true);
+                return;
+            }
+            app.set_busy(true);
+            app.set_message("".into());
+            app.set_busy_label("正在继续…".into());
+            app.set_progress(0.0);
+            app.set_percent(0);
+
+            let folder = folder.clone();
+            let pw = pw.to_string();
+            let weak2 = weak.clone();
+            std::thread::spawn(move || {
+                let last = AtomicUsize::new(usize::MAX);
+                let weak3 = weak2.clone();
+                let progress = move |done: usize, total: usize| {
+                    let pct = if total == 0 { 0 } else { done * 100 / total };
+                    if last.swap(pct, Ordering::Relaxed) == pct {
+                        return;
+                    }
+                    let _ = weak3.upgrade_in_event_loop(move |app| {
+                        app.set_progress(pct as f32 / 100.0);
+                        app.set_percent(pct as i32);
+                    });
+                };
+                let result = logic::resume(&folder, pw.as_bytes(), &progress);
+                let _ = weak2.upgrade_in_event_loop(move |app| {
+                    app.set_busy(false);
+                    match result {
+                        Ok((op, n)) => {
+                            app.set_pw1("".into());
+                            app.set_resuming(false);
+                            app.set_is_error(false);
+                            match op {
+                                folder_lock::vault::PendingOp::Encrypt => {
+                                    app.set_locked(true);
+                                    app.set_message(
+                                        format!("已继续完成加密，共处理 {} 个文件。", n).into(),
+                                    );
+                                }
+                                folder_lock::vault::PendingOp::Decrypt => {
+                                    app.set_locked(false);
+                                    app.set_message(
+                                        format!("已继续完成解密，共恢复 {} 个文件。", n).into(),
+                                    );
+                                }
+                            }
+                        }
+                        Err(e) => {
                             app.set_is_error(true);
                             app.set_message(e.into());
                         }

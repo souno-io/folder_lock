@@ -14,8 +14,8 @@ name = "flock_cli"
 path = "src/cli.rs"
 
 [dependencies]
-# Authenticated symmetric encryption
-aes-gcm = "0.10"
+# Authenticated symmetric encryption (stream = chunked AEAD for bounded memory)
+aes-gcm = { version = "0.10", features = ["stream"] }
 # Password-based key derivation (memory-hard, anti brute-force)
 argon2 = "0.5"
 # CSPRNG for salts / nonces

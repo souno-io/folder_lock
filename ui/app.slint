@@ -139,6 +139,8 @@ export component AppWindow inherits Window {
     in property <float> progress;
     in property <int> percent;
     in property <string> busy-label: "正在处理…";
+    // True when a previous encrypt/decrypt was interrupted and must be resumed.
+    in property <bool> resuming;
 
     // ── local UI state ──
     property <int> mode-index: 2;
@@ -151,6 +153,7 @@ export component AppWindow inherits Window {
     callback decrypt(string);
     callback temp-decrypt(string);
     callback re-encrypt();
+    callback resume(string);
 
     // ═══════════════════════════════════════════ main content
     VerticalLayout {
@@ -229,7 +232,7 @@ export component AppWindow inherits Window {
         }
 
         // ── ENCRYPT body (fresh folder, no vault) ──
-        if !root.locked && !root.temp-unlocked : VerticalLayout {
+        if !root.locked && !root.temp-unlocked && !root.resuming : VerticalLayout {
             spacing: 12px;
             vertical-stretch: 0;
 
@@ -291,7 +294,7 @@ export component AppWindow inherits Window {
         }
 
         // ── DECRYPT body (folder locked) ──
-        if root.locked : VerticalLayout {
+        if root.locked && !root.resuming : VerticalLayout {
             spacing: 12px;
             vertical-stretch: 0;
 
@@ -330,6 +333,47 @@ export component AppWindow inherits Window {
             }
             Text {
                 text: "“解密并解锁”会彻底解除加密；“临时解密”便于使用后快速复原。";
+                font-size: 11px;
+                color: Palette.foreground;
+                opacity: 0.55;
+                wrap: word-wrap;
+            }
+        }
+
+        // ── RESUME body (previous operation was interrupted) ──
+        if root.resuming : VerticalLayout {
+            spacing: 12px;
+            vertical-stretch: 0;
+
+            Text {
+                text: root.message;
+                font-size: 13px;
+                color: Palette.foreground;
+                opacity: 0.75;
+                wrap: word-wrap;
+            }
+            LineEdit {
+                placeholder-text: "输入密码以继续";
+                input-type: password;
+                text <=> root.pw1;
+                enabled: !root.busy;
+                accepted => {
+                    if (!root.busy) {
+                        root.resume(root.pw1);
+                    }
+                }
+            }
+            Button {
+                text: "继续";
+                primary: true;
+                height: 42px;
+                enabled: !root.busy;
+                clicked => {
+                    root.resume(root.pw1);
+                }
+            }
+            Text {
+                text: "上次操作被中断（崩溃 / 被关闭 / 断电），输入原密码即可从断点继续。";
                 font-size: 11px;
                 color: Palette.foreground;
                 opacity: 0.55;
