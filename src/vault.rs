@@ -271,7 +271,7 @@ fn parse_meta_full(meta: &[u8]) -> Result<Vec<(String, bool)>, String> {
         let rel_bytes = meta.get(pos..pos + plen as usize).ok_or("vault 数据损坏 (path)")?;
         pos += plen as usize;
         let rel = std::str::from_utf8(rel_bytes).map_err(|_| "vault 路径不是有效 UTF-8".to_string())?;
-        if rel.contains("..") || rel.starts_with('/') || rel.contains('\\') {
+        if rel.split('/').any(|c| c == "..") || rel.starts_with('/') || rel.contains('\\') {
             return Err(format!("拒绝不安全的路径: {}", rel));
         }
         let kind = *meta.get(pos).ok_or("vault 数据损坏 (kind)")?;
@@ -371,7 +371,7 @@ fn decrypt_folder_full(
         let rel_bytes = manifest.get(pos..pos + plen as usize).ok_or("vault 数据损坏 (path)")?;
         pos += plen as usize;
         let rel = std::str::from_utf8(rel_bytes).map_err(|_| "vault 路径不是有效 UTF-8".to_string())?;
-        if rel.contains("..") || rel.starts_with('/') || rel.contains('\\') {
+        if rel.split('/').any(|c| c == "..") || rel.starts_with('/') || rel.contains('\\') {
             return Err(format!("拒绝不安全的路径: {}", rel));
         }
 
@@ -572,7 +572,7 @@ fn decrypt_folder_simple(
         let rel_bytes = manifest.get(pos..pos + plen as usize).ok_or("vault 数据损坏 (path)")?;
         pos += plen as usize;
         let rel = std::str::from_utf8(rel_bytes).map_err(|_| "vault 路径不是有效 UTF-8".to_string())?;
-        if rel.contains("..") || rel.starts_with('/') || rel.contains('\\') {
+        if rel.split('/').any(|c| c == "..") || rel.starts_with('/') || rel.contains('\\') {
             return Err(format!("拒绝不安全的路径: {}", rel));
         }
 
@@ -772,7 +772,7 @@ fn decrypt_folder_move(
         let rel_bytes = manifest.get(pos..pos + plen as usize).ok_or("vault 数据损坏 (path)")?;
         pos += plen as usize;
         let rel = std::str::from_utf8(rel_bytes).map_err(|_| "vault 路径不是有效 UTF-8".to_string())?;
-        if rel.contains("..") || rel.starts_with('/') || rel.contains('\\') {
+        if rel.split('/').any(|c| c == "..") || rel.starts_with('/') || rel.contains('\\') {
             return Err(format!("拒绝不安全的路径: {}", rel));
         }
 
@@ -790,7 +790,7 @@ fn decrypt_folder_move(
             let name_bytes = manifest.get(pos..pos + nlen as usize).ok_or("vault 数据损坏 (name)")?;
             pos += nlen as usize;
             let name = std::str::from_utf8(name_bytes).map_err(|_| "名称无效".to_string())?;
-            if name.contains('/') || name.contains('\\') || name.contains("..") {
+            if name.contains('/') || name.contains('\\') || name == ".." {
                 return Err(format!("拒绝不安全的容器名: {}", name));
             }
 
@@ -1039,7 +1039,7 @@ fn parse_simple_file_rels(magic: &[u8; 8], manifest: &[u8]) -> Result<Vec<(Strin
         let rel_bytes = manifest.get(pos..pos + plen as usize).ok_or("vault 数据损坏 (path)")?;
         pos += plen as usize;
         let rel = std::str::from_utf8(rel_bytes).map_err(|_| "vault 路径不是有效 UTF-8".to_string())?;
-        if rel.contains("..") || rel.starts_with('/') || rel.contains('\\') {
+        if rel.split('/').any(|c| c == "..") || rel.starts_with('/') || rel.contains('\\') {
             return Err(format!("拒绝不安全的路径: {}", rel));
         }
         let kind = *manifest.get(pos).ok_or("vault 数据损坏 (kind)")?;
@@ -1050,7 +1050,7 @@ fn parse_simple_file_rels(magic: &[u8; 8], manifest: &[u8]) -> Result<Vec<(Strin
             let name_bytes = manifest.get(pos..pos + nlen as usize).ok_or("vault 数据损坏 (name)")?;
             pos += nlen as usize;
             let name = std::str::from_utf8(name_bytes).map_err(|_| "名称无效".to_string())?;
-            if name.contains('/') || name.contains('\\') || name.contains("..") {
+            if name.contains('/') || name.contains('\\') || name == ".." {
                 return Err(format!("拒绝不安全的容器名: {}", name));
             }
             out.push((rel.to_string(), name.to_string()));
